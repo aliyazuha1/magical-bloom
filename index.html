@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Magical Bloom AR</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#000;font-family:'Georgia',serif}
+#wrap{position:relative;width:100vw;height:100vh}
+#video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);pointer-events:none}
+#fx{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+
+/* ── Landing ── */
+#land{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  background:radial-gradient(ellipse 80% 90% at 50% 55%,#110622 0%,#04010d 100%);z-index:10}
+.logo{font-size:clamp(24px,4.5vw,52px);color:#ead8ff;letter-spacing:.2em;text-shadow:0 0 50px rgba(190,130,255,.55);margin-bottom:12px}
+.sub{color:rgba(190,155,255,.45);font-size:12px;letter-spacing:.12em;text-align:center;line-height:2.1;max-width:400px;margin-bottom:38px}
+.guide{display:grid;grid-template-columns:1fr 1fr;gap:10px 24px;margin-bottom:40px;max-width:460px}
+.guide-item{display:flex;align-items:center;gap:10px;color:rgba(200,170,255,.5);font-size:11.5px;letter-spacing:.06em}
+.guide-icon{width:28px;height:28px;border-radius:50%;border:1px solid rgba(180,120,255,.3);display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+#btn{background:rgba(110,45,210,.18);border:1px solid rgba(180,120,255,.38);color:rgba(235,210,255,.95);
+  font-family:'Georgia',serif;font-size:14px;letter-spacing:.16em;padding:17px 52px;border-radius:50px;
+  cursor:pointer;transition:all .3s;backdrop-filter:blur(14px)}
+#btn:hover{background:rgba(130,60,225,.32);border-color:rgba(200,155,255,.65);box-shadow:0 0 45px rgba(155,80,255,.35)}
+
+/* ── HUD ── */
+#hud{position:absolute;top:0;left:0;right:0;padding:18px 22px;display:none;justify-content:space-between;
+  align-items:flex-start;pointer-events:none;z-index:5}
+.pill{background:rgba(0,0,0,.42);border:1px solid rgba(180,120,255,.22);border-radius:20px;
+  padding:6px 14px;font-size:10.5px;letter-spacing:.09em;color:rgba(200,168,255,.65);
+  backdrop-filter:blur(10px);display:flex;align-items:center;gap:7px;margin-bottom:7px}
+.led{width:6px;height:6px;border-radius:50%;background:#333;flex-shrink:0;transition:background .3s}
+.led.on{background:#0f9;box-shadow:0 0 6px #0f9}
+.led.pulse{background:#f90;animation:blink .7s infinite alternate;box-shadow:0 0 6px #f90}
+@keyframes blink{to{opacity:.3}}
+#bloom-track{display:flex;align-items:center;gap:9px}
+#bloom-bar-bg{width:100px;height:3px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden}
+#bloom-bar-fill{height:100%;width:0%;background:linear-gradient(90deg,#a050ff,#ff60c8,#ffd040);border-radius:2px;transition:width .08s}
+#pinch-val{font-size:10px;color:rgba(180,140,255,.55);min-width:30px}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="fx"></canvas>
+
+  <div id="land">
+    <div class="logo">✦ Magical Bloom ✦</div>
+    <div class="sub">An augmented reality nature spell.<br>Grow a living flower from the palm of your hand.</div>
+    <div class="guide">
+      <div class="guide-item"><div class="guide-icon">🌿</div>Left palm holds the flower</div>
+      <div class="guide-item"><div class="guide-icon">✨</div>Right hand controls bloom</div>
+      <div class="guide-item"><div class="guide-icon">👐</div>Fingers apart = bud / seed</div>
+      <div class="guide-item"><div class="guide-icon">🤏</div>Pinch closed = full bloom</div>
+    </div>
+    <button id="btn">✦ Begin the Spell ✦</button>
+  </div>
+
+  <div id="hud">
+    <div>
+      <div class="pill"><span class="led" id="led-r"></span><span id="txt-r">Right hand</span></div>
+      <div class="pill"><span class="led" id="led-l"></span><span id="txt-l">Left hand</span></div>
+    </div>
+    <div>
+      <div class="pill" id="bloom-track">
+        🌸 <span id="bloom-bar-bg"><span id="bloom-bar-fill"></span></span>
+        <span id="pinch-val">0%</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
+<script>
+// ══════════════════════════════════════════
+//  CANVAS & GLOBALS
+// ══════════════════════════════════════════
+const canvas = document.getElementById('fx');
+const ctx    = canvas.getContext('2d');
+let W, H;
+function resize(){ W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+// ── hand data ──
+let RH = null, LH = null;   // arrays of {x,y} canvas-space
+let pinchDist = 1;           // raw pixel distance thumb↔index right hand
+let pinchNorm = 0;           // 0 = fully open, 1 = fully pinched (bloom driver)
+let smoothBloom = 0;         // lerped bloom 0→1
+let T = 0;                   // global time
+
+// ── particle pools ──
+const streams = [], dust = [], sparkles = [], pollen = [];
+
+// ── helpers ──
+const lerp  = (a,b,t) => a+(b-a)*t;
+const clamp = (v,lo,hi) => Math.min(hi,Math.max(lo,v));
+const easeIn  = t => t*t*t;
+const easeOut = t => 1-(1-t)**3;
+const hypot   = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
+
+// ══════════════════════════════════════════
+//  PARTICLE CLASSES
+// ══════════════════════════════════════════
+class StreamParticle {
+  constructor(sx,sy,tx,ty,bloom){
+    this.sx=sx; this.sy=sy; this.tx=tx; this.ty=ty;
+    this.p=0; this.spd=0.013+Math.random()*0.018;
+    this.hue=[285,200,315,48,162,330][~~(Math.random()*6)];
+    this.size=2+Math.random()*3.2;
+    this.wb=Math.random()*Math.PI*2;
+    this.wbAmt=12+bloom*25;   // wider spread at high bloom
+    this.trail=[];
+  }
+  update(){
+    this.p  += this.spd;
+    this.wb += 0.09;
+    const u=this.p, v=1-u;
+    const cx=(this.sx+this.tx)/2 + Math.sin(this.wb)*this.wbAmt;
+    const cy=(this.sy+this.ty)/2 - H*0.07;
+    this.x = v*v*this.sx + 2*v*u*cx + u*u*this.tx;
+    this.y = v*v*this.sy + 2*v*u*cy + u*u*this.ty;
+    this.trail.unshift({x:this.x, y:this.y});
+    if(this.trail.length>14) this.trail.pop();
+    return this.p < 1;
+  }
+  draw(){
+    if(!this.trail.length) return;
+    ctx.save();
+    ctx.globalCompositeOperation='screen';
+    for(let i=0;i<this.trail.length-1;i++){
+      const a = (1-i/this.trail.length)*(1-this.p*0.25)*0.9;
+      const r = this.size*(1-i/this.trail.length);
+      ctx.beginPath();
+      ctx.arc(this.trail[i].x, this.trail[i].y, r, 0, Math.PI*2);
+      ctx.fillStyle=`hsla(${this.hue},92%,76%,${a})`;
+      ctx.shadowColor=`hsla(${this.hue},100%,70%,${a*0.7})`;
+      ctx.shadowBlur=13;
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+class Dust {
+  constructor(x,y,hue,big=false){
+    this.x=x; this.y=y;
+    const sp=big?3:1.5;
+    this.vx=(Math.random()-.5)*sp;
+    this.vy=-Math.random()*(big?3.8:2.2)-.5;
+    this.r=big?2.5+Math.random()*3:1+Math.random()*2;
+    this.hue=hue+~~(Math.random()*40-20);
+    this.life=1; this.decay=0.007+Math.random()*0.013;
+  }
+  update(){ this.x+=this.vx; this.y+=this.vy; this.vy+=0.032; this.life-=this.decay; return this.life>0; }
+  draw(){
+    ctx.save();
+    ctx.globalAlpha=this.life*0.85;
+    ctx.globalCompositeOperation='screen';
+    ctx.beginPath(); ctx.arc(this.x,this.y,this.r,0,Math.PI*2);
+    ctx.fillStyle=`hsla(${this.hue},90%,80%,1)`;
+    ctx.shadowColor=`hsla(${this.hue},100%,70%,.9)`;
+    ctx.shadowBlur=10; ctx.fill();
+    ctx.restore();
+  }
+}
+
+class Sparkle {
+  constructor(x,y,hue){
+    this.x=x; this.y=y;
+    this.vx=(Math.random()-.5)*4; this.vy=-Math.random()*5-1;
+    this.size=5+Math.random()*8; this.hue=hue;
+    this.life=1; this.decay=0.008+Math.random()*0.016;
+    this.spin=Math.random()*Math.PI;
+  }
+  update(){ this.x+=this.vx; this.y+=this.vy; this.vy+=0.055; this.spin+=0.14; this.life-=this.decay; return this.life>0; }
+  draw(){
+    ctx.save();
+    ctx.globalAlpha=this.life*this.life;
+    ctx.globalCompositeOperation='screen';
+    ctx.translate(this.x,this.y); ctx.rotate(this.spin);
+    const s=this.size*this.life;
+    ctx.beginPath();
+    ctx.moveTo(0,-s); ctx.lineTo(s*0.25,0); ctx.lineTo(0,s); ctx.lineTo(-s*0.25,0); ctx.closePath();
+    ctx.fillStyle=`hsla(${this.hue},90%,88%,1)`;
+    ctx.shadowColor=`hsla(${this.hue},100%,80%,.85)`; ctx.shadowBlur=14; ctx.fill();
+    ctx.restore();
+  }
+}
+
+class Pollen {
+  constructor(fx,fy,bloom){
+    const ang=Math.random()*Math.PI*2;
+    const r=20+Math.random()*60*bloom;
+    this.x=fx+Math.cos(ang)*r; this.y=fy+Math.sin(ang)*r;
+    this.vx=(Math.random()-.5)*0.6; this.vy=-Math.random()*0.8-0.2;
+    this.r=1+Math.random()*1.5;
+    this.hue=[50,60,48,55,44][~~(Math.random()*5)];
+    this.life=1; this.decay=0.004+Math.random()*0.007;
+    this.wobX=Math.random()*Math.PI*2; this.wobSpd=0.03+Math.random()*0.04;
+  }
+  update(){ this.wobX+=this.wobSpd; this.x+=this.vx+Math.sin(this.wobX)*0.4; this.y+=this.vy; this.life-=this.decay; return this.life>0; }
+  draw(){
+    ctx.save(); ctx.globalAlpha=this.life*0.75; ctx.globalCompositeOperation='screen';
+    ctx.beginPath(); ctx.arc(this.x,this.y,this.r,0,Math.PI*2);
+    ctx.fillStyle=`hsla(${this.hue},95%,82%,1)`;
+    ctx.shadowColor=`hsla(${this.hue},100%,78%,.8)`; ctx.shadowBlur=7; ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ══════════════════════════════════════════
+//  FLOWER RENDERER
+// ══════════════════════════════════════════
+// bloom: 0 = seed, 1 = full flower
+const OUTER_PETALS=[
+  {h:308,s:88,l:72},{h:282,s:84,l:74},{h:200,s:86,l:73},
+  {h:50,s:93,l:74},{h:152,s:78,l:62},{h:320,s:85,l:70},
+  {h:258,s:80,l:75},{h:32,s:90,l:72}
+];
+const INNER_PETALS=[{h:48},{h:62},{h:38},{h:58},{h:44}];
+
+function petal(cx,cy,ang,len,wid,h,s,l,alpha,t){
+  ctx.save();
+  ctx.translate(cx,cy);
+  ctx.rotate(ang + Math.sin(t*0.65+ang)*0.032);
+  const g=ctx.createLinearGradient(0,0,0,-len);
+  g.addColorStop(0,   `hsla(${h},${s}%,${l*0.5}%,${alpha})`);
+  g.addColorStop(0.42,`hsla(${h+18},${s}%,${l}%,${alpha})`);
+  g.addColorStop(1,   `hsla(${h+36},${Math.max(s-14,20)}%,${Math.min(l+18,95)}%,${alpha*0.5})`);
+  ctx.beginPath();
+  ctx.moveTo(0,0);
+  ctx.bezierCurveTo(-wid*.58,-len*.27,-wid*.9,-len*.63,0,-len);
+  ctx.bezierCurveTo( wid*.9,-len*.63, wid*.58,-len*.27,0,0);
+  ctx.closePath();
+  ctx.fillStyle=g;
+  ctx.shadowColor=`hsla(${h},90%,72%,${alpha*0.6})`; ctx.shadowBlur=22;
+  ctx.globalCompositeOperation='screen'; ctx.fill();
+  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,-len*0.87);
+  ctx.strokeStyle=`hsla(${h},30%,96%,${alpha*0.2})`; ctx.lineWidth=0.8; ctx.stroke();
+  ctx.restore();
+}
+
+function drawSeed(cx,cy,bloom,t){
+  // 0..~0.08  → glowing seed
+  const a=clamp(1-bloom/0.08,0,1);
+  if(a<0.01) return;
+  ctx.save(); ctx.globalCompositeOperation='screen';
+  const g=ctx.createRadialGradient(cx,cy,0,cx,cy,10*a+3);
+  g.addColorStop(0,`rgba(255,255,180,${a})`);
+  g.addColorStop(0.4,`hsla(55,100%,75%,${a*0.7})`);
+  g.addColorStop(1,'transparent');
+  ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,10*a+3,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function drawFlower(anchorX, anchorY, bloom, t){
+  if(bloom<0.005) return;
+
+  // stem grows from anchor upward
+  const stemMax=115;
+  const stemPct=clamp((bloom-0.04)/0.5,0,1); // stem appears bloom 0.04–0.54
+  const stemLen=easeOut(stemPct)*stemMax;
+  const curl=Math.sin(t*0.4)*4*bloom;
+  const hx=anchorX, hy=anchorY-stemLen;
+
+  // ── stem ──
+  if(stemLen>2){
+    ctx.save(); ctx.globalCompositeOperation='screen';
+    ctx.beginPath();
+    ctx.moveTo(anchorX, anchorY);
+    ctx.bezierCurveTo(anchorX+curl,anchorY-stemLen*0.38,anchorX-curl,anchorY-stemLen*0.73,hx,hy);
+    const sg=ctx.createLinearGradient(anchorX,anchorY,hx,hy);
+    sg.addColorStop(0,'hsla(140,72%,22%,.95)'); sg.addColorStop(.55,'hsla(145,76%,38%,.9)'); sg.addColorStop(1,'hsla(155,68%,52%,.72)');
+    ctx.strokeStyle=sg; ctx.lineWidth=clamp(2.5+bloom*2.5,2.5,5);
+    ctx.shadowColor='rgba(30,200,65,.32)'; ctx.shadowBlur=12; ctx.stroke();
+    ctx.restore();
+  }
+
+  // ── leaves ── appear bloom 0.28–0.55
+  if(bloom>0.28 && stemLen>10){
+    const lb=easeOut(clamp((bloom-0.28)/0.27,0,1));
+    const leafData=[
+      {lx:anchorX-3, ly:anchorY-stemLen*0.42, side:-1, sz:42},
+      {lx:anchorX+3, ly:anchorY-stemLen*0.66, side:1,  sz:34}
+    ];
+    leafData.forEach(({lx,ly,side,sz})=>{
+      const ll=lb*sz; if(ll<2) return;
+      ctx.save(); ctx.globalCompositeOperation='screen';
+      ctx.translate(lx,ly); ctx.rotate(side*0.55+Math.sin(t*0.4)*0.05-Math.PI/2);
+      const lg=ctx.createLinearGradient(0,0,0,-ll);
+      lg.addColorStop(0,'hsla(140,78%,23%,.9)'); lg.addColorStop(.5,'hsla(148,82%,41%,.85)'); lg.addColorStop(1,'hsla(156,72%,57%,.4)');
+      ctx.beginPath();
+      ctx.moveTo(0,0);
+      ctx.bezierCurveTo(-ll*.38,-ll*.28,-ll*.52,-ll*.72,0,-ll);
+      ctx.bezierCurveTo( ll*.52,-ll*.72, ll*.38,-ll*.28,0,0);
+      ctx.closePath(); ctx.fillStyle=lg;
+      ctx.shadowColor='rgba(0,230,80,.28)'; ctx.shadowBlur=14; ctx.fill();
+      ctx.restore();
+    });
+  }
+
+  // ── aura ──
+  ctx.save(); ctx.globalCompositeOperation='screen';
+  const auraR=80*bloom;
+  const ag=ctx.createRadialGradient(hx,hy,0,hx,hy,auraR);
+  ag.addColorStop(0,`hsla(285,88%,66%,${0.38*bloom})`);
+  ag.addColorStop(0.35,`hsla(205,84%,61%,${0.15*bloom})`);
+  ag.addColorStop(0.7,`hsla(315,80%,58%,${0.06*bloom})`);
+  ag.addColorStop(1,'transparent');
+  ctx.fillStyle=ag; ctx.beginPath(); ctx.arc(hx,hy,auraR,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  // ── outer petals (8) staggered bloom 0.1 → 1.0 ──
+  OUTER_PETALS.forEach((pd,i)=>{
+    const start=0.1+i*0.04, end=start+0.55;
+    const s=easeOut(clamp((bloom-start)/(end-start),0,1));
+    if(s<0.01) return;
+    const ang=(i/8)*Math.PI*2 + t*0.1;
+    const len=(44+bloom*28)*s;
+    const wid=(17+bloom*11)*s;
+    petal(hx,hy,ang,len,wid,pd.h,pd.s,pd.l,0.9,t);
+  });
+
+  // ── inner petals (5) bloom 0.5 → 1.0 ──
+  if(bloom>0.5){
+    const ib=easeOut(clamp((bloom-0.5)/0.38,0,1));
+    INNER_PETALS.forEach((pd,i)=>{
+      const ang=(i/5)*Math.PI*2+Math.PI/5-t*0.16;
+      const len=(20+bloom*16)*ib, wid=(9+bloom*6)*ib;
+      petal(hx,hy,ang,len,wid,pd.h,95,80,0.85,t);
+    });
+  }
+
+  // ── seed glow (early bloom) ──
+  if(bloom<0.15) drawSeed(hx,hy,bloom,t);
+
+  // ── center orb ──
+  ctx.save(); ctx.globalCompositeOperation='screen';
+  const or=5+bloom*11;
+  const cg=ctx.createRadialGradient(hx,hy-or*0.1,0,hx,hy,or);
+  cg.addColorStop(0,'rgba(255,255,205,1)');
+  cg.addColorStop(0.3,`hsla(52,100%,82%,${bloom})`);
+  cg.addColorStop(0.7,`hsla(34,90%,68%,${bloom*0.5})`);
+  cg.addColorStop(1,'transparent');
+  ctx.fillStyle=cg; ctx.shadowColor='rgba(255,230,100,.95)'; ctx.shadowBlur=28;
+  ctx.beginPath(); ctx.arc(hx,hy,or,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  // ── sparkle ring at full bloom ──
+  if(bloom>0.62){
+    const sb=easeOut(clamp((bloom-0.62)/0.3,0,1));
+    for(let i=0;i<12;i++){
+      const ang=(i/12)*Math.PI*2+t*0.42;
+      const r=(18+bloom*32)*sb+Math.sin(t*1.4+i)*4;
+      const sx=hx+Math.cos(ang)*r, sy=hy+Math.sin(ang)*r;
+      const al=(0.42+Math.sin(t*2+i)*0.32)*sb;
+      const hue=[300,50,200,150,270,40,180,320,260,90,30,160][i];
+      ctx.save(); ctx.globalCompositeOperation='screen';
+      ctx.beginPath(); ctx.arc(sx,sy,1.8*sb,0,Math.PI*2);
+      ctx.fillStyle=`hsla(${hue},90%,88%,${al})`;
+      ctx.shadowColor=`hsla(${hue},100%,80%,${al})`; ctx.shadowBlur=9;
+      ctx.fill(); ctx.restore();
+      if(bloom>0.75 && Math.random()<0.04){ dust.push(new Dust(sx,sy,hue,false)); }
+    }
+  }
+
+  // ── pollen cloud ──
+  if(bloom>0.55 && Math.random()<bloom*0.4){
+    pollen.push(new Pollen(hx,hy,bloom));
+  }
+
+  // ── warm hand glow ──
+  ctx.save(); ctx.globalCompositeOperation='screen';
+  const pg=ctx.createRadialGradient(anchorX,anchorY,0,anchorX,anchorY,75*bloom);
+  pg.addColorStop(0,`hsla(50,88%,70%,${0.18*bloom})`); pg.addColorStop(1,'transparent');
+  ctx.fillStyle=pg; ctx.beginPath(); ctx.arc(anchorX,anchorY,75*bloom,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+// ══════════════════════════════════════════
+//  PINCH GLOW (right hand)
+// ══════════════════════════════════════════
+function drawPinchGlow(px,py,norm,t){
+  // norm: 1 = fully pinched (bloom), 0 = open
+  if(norm<0.04) return;
+  ctx.save(); ctx.globalCompositeOperation='screen';
+  const r=28+norm*24;
+  const g=ctx.createRadialGradient(px,py,0,px,py,r);
+  g.addColorStop(0,`rgba(255,255,255,${norm*0.95})`);
+  g.addColorStop(0.2,`hsla(268,90%,78%,${norm*0.55})`);
+  g.addColorStop(0.6,`hsla(200,88%,68%,${norm*0.2})`);
+  g.addColorStop(1,'transparent');
+  ctx.fillStyle=g; ctx.beginPath(); ctx.arc(px,py,r,0,Math.PI*2); ctx.fill();
+  for(let i=0;i<7;i++){
+    const a=t*1.9+i*(Math.PI*2/7);
+    const or=18+norm*15;
+    ctx.beginPath(); ctx.arc(px+Math.cos(a)*or, py+Math.sin(a)*or, 2.4*norm, 0, Math.PI*2);
+    ctx.fillStyle=`hsla(${268+i*22},90%,82%,${norm*0.85})`;
+    ctx.shadowColor=`hsla(${268+i*22},100%,74%,${norm})`; ctx.shadowBlur=13; ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ══════════════════════════════════════════
+//  ENERGY BEAM (right pinch → left flower)
+// ══════════════════════════════════════════
+function drawBeam(px,py,fx,fy,norm,t){
+  if(norm<0.08) return;
+  const alpha=norm*0.55;
+  ctx.save(); ctx.globalCompositeOperation='screen';
+  // core ribbons
+  for(let layer=0;layer<4;layer++){
+    ctx.beginPath();
+    const segs=22;
+    for(let i=0;i<=segs;i++){
+      const f=i/segs;
+      const x=lerp(px,fx,f);
+      const y=lerp(py,fy,f) + Math.sin(f*Math.PI*3+t*2.2+layer)*18*norm*Math.sin(f*Math.PI);
+      if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }
+    const hue=265+layer*25;
+    ctx.strokeStyle=`hsla(${hue},90%,72%,${alpha*(0.5-layer*0.1)})`;
+    ctx.lineWidth=(5-layer*1.1)*norm;
+    ctx.shadowColor=`hsla(${hue},90%,72%,.5)`; ctx.shadowBlur=18;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ══════════════════════════════════════════
+//  MAIN LOOP
+// ══════════════════════════════════════════
+const DT=1/60;
+let lastFlowerPos={x:0,y:0};  // smoothed anchor
+
+function loop(){
+  requestAnimationFrame(loop);
+  T+=DT;
+
+  // ── mirror-flip video onto canvas ──
+  ctx.save(); ctx.translate(W,0); ctx.scale(-1,1);
+  ctx.drawImage(document.getElementById('video'),0,0,W,H);
+  ctx.restore();
+
+  // ── vignette ──
+  ctx.save();
+  const vg=ctx.createRadialGradient(W/2,H/2,H*0.28,W/2,H/2,H*0.82);
+  vg.addColorStop(0,'transparent'); vg.addColorStop(1,'rgba(0,0,0,.48)');
+  ctx.fillStyle=vg; ctx.fillRect(0,0,W,H);
+  ctx.restore();
+
+  // ── compute pinch (right hand) ──
+  let pinchPt=null, palmAnchor=null;
+  let rawDist=999;
+
+  if(RH){
+    const th=RH[4], idx=RH[8];
+    rawDist=hypot(th,idx);
+    pinchPt={x:(th.x+idx.x)/2, y:(th.y+idx.y)/2};
+  }
+
+  if(LH){
+    // anchor between wrist(0) and middle knuckle(9), biased toward fingers
+    const wr=LH[0], mk=LH[9];
+    const dx=mk.x-wr.x, dy=mk.y-wr.y;
+    const mag=Math.hypot(dx,dy)||1;
+    palmAnchor={x:mk.x+dx/mag*12, y:mk.y+dy/mag*12};
+  }
+
+  // Smooth flower anchor position
+  if(palmAnchor){
+    lastFlowerPos.x=lerp(lastFlowerPos.x,palmAnchor.x,0.18);
+    lastFlowerPos.y=lerp(lastFlowerPos.y,palmAnchor.y,0.18);
+  }
+
+  // Normalize: 0=open(seed), 1=pinched(full bloom)
+  // max open ≈ 90px, fully closed ≈ 12px on typical screen
+  const rawNorm=clamp(1-(rawDist-12)/80,0,1);
+  pinchNorm=lerp(pinchNorm, RH?rawNorm:0, 0.1);
+
+  // Smooth bloom follows pinch with slight lag
+  smoothBloom=lerp(smoothBloom, pinchNorm, 0.08);
+
+  // ── spawn stream particles ──
+  if(pinchPt && palmAnchor && pinchNorm>0.06){
+    const rate=~~(pinchNorm*5);
+    for(let i=0;i<rate;i++){
+      streams.push(new StreamParticle(
+        pinchPt.x+(Math.random()-.5)*10, pinchPt.y+(Math.random()-.5)*10,
+        lastFlowerPos.x+(Math.random()-.5)*30, lastFlowerPos.y+(Math.random()-.5)*30,
+        pinchNorm
+      ));
+    }
+    if(Math.random()<pinchNorm*0.5){
+      const hs=[290,200,320,52,165];
+      dust.push(new Dust(pinchPt.x+(Math.random()-.5)*16, pinchPt.y+(Math.random()-.5)*16, hs[~~(Math.random()*5)]));
+    }
+    // arrival glow at palm
+    if(Math.random()<pinchNorm*0.3){
+      dust.push(new Dust(lastFlowerPos.x+(Math.random()-.5)*35, lastFlowerPos.y+(Math.random()-.5)*35, [300,50,200,150,270][~~(Math.random()*5)], true));
+    }
+  }
+
+  // ── full bloom sparkle burst ──
+  if(smoothBloom>0.88 && Math.random()<0.18 && palmAnchor){
+    const hs=[300,52,200,152,280,42];
+    sparkles.push(new Sparkle(
+      lastFlowerPos.x+(Math.random()-.5)*80,
+      lastFlowerPos.y-30+(Math.random()-.5)*70,
+      hs[~~(Math.random()*hs.length)]
+    ));
+  }
+
+  // ── draw energy beam ──
+  if(pinchPt && palmAnchor)
+    drawBeam(pinchPt.x,pinchPt.y,lastFlowerPos.x,lastFlowerPos.y,pinchNorm,T);
+
+  // ── update & draw streams ──
+  for(let i=streams.length-1;i>=0;i--){
+    if(!streams[i].update()) streams.splice(i,1);
+    else streams[i].draw();
+  }
+
+  // ── draw flower ──
+  drawFlower(lastFlowerPos.x, lastFlowerPos.y, smoothBloom, T);
+
+  // ── pinch glow ──
+  if(pinchPt) drawPinchGlow(pinchPt.x,pinchPt.y,pinchNorm,T);
+
+  // ── dust, sparkles, pollen ──
+  for(let i=dust.length-1;i>=0;i--){ if(!dust[i].update()) dust.splice(i,1); else dust[i].draw(); }
+  for(let i=sparkles.length-1;i>=0;i--){ if(!sparkles[i].update()) sparkles.splice(i,1); else sparkles[i].draw(); }
+  for(let i=pollen.length-1;i>=0;i--){ if(!pollen[i].update()) pollen.splice(i,1); else pollen[i].draw(); }
+
+  // ── pool limits ──
+  if(streams.length>600)  streams.splice(0,streams.length-600);
+  if(dust.length>450)     dust.splice(0,dust.length-450);
+  if(sparkles.length>200) sparkles.splice(0,sparkles.length-200);
+  if(pollen.length>300)   pollen.splice(0,pollen.length-300);
+
+  // ── HUD updates ──
+  const lr=document.getElementById('led-r'), ll=document.getElementById('led-l');
+  lr.className='led'+(RH?' pulse':' '); ll.className='led'+(LH?' on':' ');
+  document.getElementById('txt-r').textContent = RH
+    ? `Right hand · pinch ${~~(pinchNorm*100)}%` : 'Right hand — not visible';
+  document.getElementById('txt-l').textContent = LH ? 'Left hand ✓' : 'Left hand — not visible';
+  document.getElementById('bloom-bar-fill').style.width=(smoothBloom*100)+'%';
+  document.getElementById('pinch-val').textContent=~~(smoothBloom*100)+'%';
+}
+
+// ══════════════════════════════════════════
+//  MEDIAPIPE
+// ══════════════════════════════════════════
+function onResults(results){
+  RH=null; LH=null;
+  if(!results.multiHandLandmarks||!results.multiHandedness) return;
+  results.multiHandedness.forEach((info,i)=>{
+    // video is mirrored: MP Right = user left
+    const side = info.label==='Right'?'left':'right';
+    const lms  = results.multiHandLandmarks[i].map(p=>({x:(1-p.x)*W, y:p.y*H, z:p.z}));
+    if(side==='right') RH=lms;
+    else               LH=lms;
+  });
+}
+
+async function start(){
+  document.getElementById('land').style.display='none';
+  document.getElementById('hud').style.display='flex';
+
+  const vid=document.getElementById('video');
+  const mp=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}`});
+  mp.setOptions({maxNumHands:2,modelComplexity:1,minDetectionConfidence:0.72,minTrackingConfidence:0.68});
+  mp.onResults(onResults);
+
+  const cam=new Camera(vid,{
+    onFrame:async()=>{ await mp.send({image:vid}); },
+    width:1280, height:720
+  });
+  await cam.start();
+  loop();
+}
+
+document.getElementById('btn').addEventListener('click', start);
+</script>
+</body>
+</html>
